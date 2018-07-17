@@ -2,13 +2,12 @@
 #import pathlib as Path
 import numpy as np
 import matplotlib.pyplot as plt
-
 import pydicom as dicom
-import logging,warnings
+import warnings
 import glob,os
 import operator
+import sys,re
 import cv2
-
 def listdir_nohidden(path):
     return glob.glob(os.path.join(path, '*'))
 
@@ -25,28 +24,40 @@ def get_contour_file(path):
         contour_file (str): name of the file with the contour
     """
     # handle `/` missing
-    if path[-1] != '/': path += '/'
-    # get .dcm contour file
-    fpaths = [f for f in listdir_nohidden(path) if '.dcm' in f]
-    n = 0
-    contour_file = ''
-    for fpath in fpaths:
-        f = dicom.read_file(fpath)
-        if 'ROIContourSequence' in dir(f):
-            contour_file = fpath.split('/')[-1]
-            n += 1
-    if n > 1: warnings.warn("There are multiple files, returning the last one!")
-    return contour_file
+    try:
+        if path[-1] != '/': path += '/'
+
+        # get .dcm contour file
+        fpaths = [f for f in listdir_nohidden(path) if '.dcm' in f]
+
+        n = 0
+        contour_file = ''
+        for fpath in fpaths:
+            f = dicom.read_file(fpath)
+            if 'ROIContourSequence' in dir(f):
+                contour_file = fpath.split('/')[-1]
+                n += 1
+        if n > 1: warnings.warn("There are multiple files, returning the last one!")
+        return contour_file
+    except dicom.errors.InvalidDicomError:
+        warnings.warn('File is missing DICOM File Meta Information header. Path:')
+        print path
+        return None
 
 
-logging.basicConfig(level=logging.DEBUG)
-logging.basicConfig(filename='errors.log',level=logging.DEBUG)
+#logging.basicConfig(level=logging.DEBUG)
+#logging.basicConfig(filename='errors.log',level=logging.DEBUG)
 
 
 
-def create_dataset(image_shape=512, n_set='train', path='./Breast_MRI_cont/', roi_name = 'GTV'):
+def create_dataset(image_shape=512, n_set='train', path='./Breast_MRI_cont/', roi_name = 'GTV', ret_files = False ):
+    """
+    This function extracts and returns all dicom files and contours within the given path directory.
 
+    Inputs:
+    """
     images, images_norm, contour_mask, roi_squares= [], [], [], []
+
 
     if path[-1] != '/': path += '/'
 
@@ -57,13 +68,21 @@ def create_dataset(image_shape=512, n_set='train', path='./Breast_MRI_cont/', ro
         contour_filename = get_contour_file(filename)
 
         img_voxel,img_norm_voxel, mask_voxel,roi_square_ = get_data(filename, contour_filename, roi_name = roi_name)
-
+        
         images += img_voxel
-        images_norm += img_norm_voxel
         contour_mask += mask_voxel
-        roi_squares += roi_square_
+        
+        # images_norm += img_norm_voxel
+        # roi_squares += roi_square_
 
-    return images, images_norm, contour_mask,roi_squares
+        print 'Loaded.'
+        sys.stdout.flush()
+    if ret_files:
+        return images, images_norm, contour_mask,roi_squares, [files for files in listdir_nohidden(path)]
+    else:
+        return images, images_norm, contour_mask,roi_squares
+
+
 
 
 # In[5]:
@@ -132,8 +151,11 @@ def get_roi_contour_ds(rt_sequence, index=-1, name = ''):
         return contours
 
     except (IndexError,ValueError), e:
-        logging.debug('There was an error in <<get_roi_contour_ds>>.')
+        warnings.warn('There was an error in <<get_roi_contour_ds>>.Returning empty array')
+        #logging.debug('There was an error in <<get_roi_contour_ds>>.')
         #return an empty list
+        return []
+    except (AttributeError), e:
         return []
 
 
@@ -223,13 +245,13 @@ def get_mask_dict(contour_datasets, path):
 
         for cdataset in contour_datasets:
             coords, img_id, shape = contour2poly(cdataset, path)
-    #        print coords
+
             mask = poly_to_mask(coords, *shape)
-    #        print('mask\n\n')
+
             img_contours_dict[img_id] += mask
         return img_contours_dict
     except TypeError, e:
-        logging.debug('TypeError in <<get_mask_dict>>.')
+        warnings.warn('TypeError in <<get_mask_dict>>.')
 
 
 
@@ -258,18 +280,10 @@ def parse_dicom_file(filename):
             dcm_image = dcm_image*slope + intercept
         return dcm_image
     except dicom.errors.InvalidDicomError:
+        warnings.warn('InvalidDicomError in <<parse_dicom_file>>')
         return None
 
 
-#the dictionary containing the slice -- mask information
-
-#mask_dict = get_mask_dict(1, image_path)
-
-#get the orders the slices come in
-#slice_orders = dcm.slice_order(image_path)
-
-
-#mask_dict.items()
 
 
 def contour2poly1(contour_dataset, path):
@@ -308,7 +322,7 @@ def contour2poly1(contour_dataset, path):
     origin_x, origin_y, _ = img.ImagePositionPatient
     # y, x is how it's mapped
 
-    pixel_coords = [( np.abs(np.ceil((x - origin_x) / x_spacing)), np.ceil((origin_y + y) / y_spacing))  for x, y, _ in coord]
+    pixel_coords = [(np.abs(np.ceil((x - origin_x) / x_spacing)), np.ceil((origin_y + y) / y_spacing)) for x, y, _ in coord]
 
     return pixel_coords, img_ID, img_shape
 
@@ -329,6 +343,7 @@ def get_img_mask_voxel(slice_orders, mask_dict, image_path):
     img_voxel = []
     mask_voxel = []
 
+
     for img_id, _ in slice_orders:
         img_array = parse_dicom_file(image_path + 'MR.'+img_id + '.dcm')
         if mask_dict is not None:
@@ -338,6 +353,9 @@ def get_img_mask_voxel(slice_orders, mask_dict, image_path):
                 mask_array = np.zeros_like(img_array)
             img_voxel.append(img_array)
             mask_voxel.append(mask_array)
+        else:
+            img_voxel.append(img_array)
+            mask_voxel.append(np.zeros_like(img_array))
     return img_voxel, mask_voxel
 
 #img_data, mask_data = get_img_mask_voxel(slice_orders, mask_dict, image_path)
@@ -357,9 +375,9 @@ def show_img_msk_fromarray(img_arr, msk_arr, square_arr = [], alpha=0.35, sz=7, 
 
     msk_arr = np.ma.masked_where(msk_arr == 0, msk_arr)
 
-    square = get_roi_square(img_arr, msk_arr)
+    #square = get_roi_square(img_arr, msk_arr)
 
-#   box = create_roi_square(bbox2(msk_arr))
+    #box = create_roi_square(bbox2(msk_arr))
 
     plt.figure(figsize=(sz, sz))
     plt.subplot(1, 3, 1)
@@ -376,7 +394,8 @@ def show_img_msk_fromarray(img_arr, msk_arr, square_arr = [], alpha=0.35, sz=7, 
         plt.show()
     else:
         plt.savefig(save_path)
-        plt.close()
+        plt.close('all')
+        
 
 def get_roi_square(image, contour, shape_out = 64):
     """
@@ -418,7 +437,6 @@ def slice_order(path):
             slices.append(f)
         except:
             continue
-
     slice_dict = {s.SOPInstanceUID: s.ImagePositionPatient[-1] for s in slices}
     ordered_slices = sorted(slice_dict.items(), key=operator.itemgetter(1))
     return ordered_slices
@@ -437,53 +455,73 @@ def get_data(image_path, contour_filename, roi_name):
         img_voxel (np.array): 3 dimensional numpy array of ordered images
         mask_voxel (np.array): 3 dimensional numpy array of ordered masks
     """
+    if image_path[-1] != '/': image_path += '/'
     try:
 
         # read dataset for contour
-        rt_sequence = dicom.read_file(image_path+contour_filename)
+        try:
+            if contour_filename is not None:
+                rt_sequence = dicom.read_file(image_path+contour_filename)
+            else:
+                raise dicom.errors.InvalidDicomError()
+            # get contour datasets name roi_name
+            contour_datasets = get_roi_contour_ds(rt_sequence, name = roi_name)
 
-        # get contour datasets with index idx
-        contour_datasets = get_roi_contour_ds(rt_sequence, name = roi_name)
-    #    print contour_datasets
+            # construct mask dictionary
+            mask_dict = get_mask_dict(contour_datasets, image_path)
 
-        # construct mask dictionary
-        mask_dict = get_mask_dict(contour_datasets, image_path)
+        except dicom.errors.InvalidDicomError:
+            warnings.warn('There was an error opening the dicom file. path:')
+            print image_path
 
+            rt_sequence = None
+            contour_datasets = None
+            mask_dict = None
 
         # get slice orders
         slice_orders = slice_order(image_path)
 
-
         # get image and mask data for patient
         img_voxel, mask_voxel  = get_img_mask_voxel(slice_orders, mask_dict, image_path)
 
-#        masks = [mask for mask in mask_voxel]
+        # masks = [mask for mask in mask_voxel]
         square_voxel = []
         for mask in mask_voxel:
-            square_voxel.append(np.asarray(create_roi_square(bbox2(mask))))
+            bbox = bbox2(mask)
+            roi = create_roi_square(bbox=bbox)
+            if roi is None:
+                square_voxel.append(None)
+            else:
+                square_voxel.append(np.asarray(roi))
 
         img_norm_voxel = normalize(img_voxel)
 
-        """
-        mean = np.mean(np.asarray(img_voxels))
-        min_ = np.amin(np.asarray(img_voxels))
-        max_ = np.amax(np.asarray(img_voxels))
-        """
-
+            
+            # img_norm_voxel = img_norm_voxel.tolist()
         return img_voxel,img_norm_voxel.tolist(), mask_voxel, square_voxel
+
+
     except OSError:
-        logging.debug('OSErrir in <<get_data>>. Path: {}{}'.format(image_path,contour_filename))
+        path = image_path+contour_filename
+        warnings.warn('OSErrir in <<get_data>>. Path:')
+        print path
+        #logging.debug('OSErrir in <<get_data>>. Path: {}{}'.format(image_path,contour_filename))
 
 def normalize(image):
+    """
+    Center and normalize image
+    """
+    if image is None:
+        return none
+
     MIN_BOUND,MAX_BOUND = np.amin(np.asarray(image)),np.amax(np.asarray(image))
 
     mean = np.mean(np.asarray(image))
     std = np.std(np.asarray(image))
 
-    img = image - mean
-    img = img/std
+    img = np.asarray(image) - mean
+    img = np.asarray(img)/std
     return img
-
 def bbox2(img):
     """
     Get a bounding box around an image
@@ -501,6 +539,7 @@ def bbox2(img):
         return rmin, rmax, cmin, cmax
     except:
         return (0,0,0,0)
+
 def bbox1(img):
     a = np.where(img != 0)
     bbox = np.min(a[0]), np.max(a[0]), np.min(a[1]), np.max(a[1])
@@ -511,11 +550,12 @@ def create_roi_square(bbox = (0,0,0,0), orig_img_size = (512,512), output_size =
     Create a grid of size output_size as
     Inputs:
         bbox:coordinates of a bounding box, ordered (row1,row2,col1,col2)
-    """
-    arr = np.zeros(orig_img_size)
 
-    if bbox is (0,0,0,0):
-        return np.meshgrid(arr)
+    """
+
+    arr = np.zeros(orig_img_size)
+    if (bbox[0]==0&bbox[1]==0&bbox[2]==0&bbox[3]==0):
+        return np.zeros(output_size)
     else:
         Y_min = bbox[0]
         Y_max = bbox[1]
@@ -530,3 +570,70 @@ def create_roi_square(bbox = (0,0,0,0), orig_img_size = (512,512), output_size =
         else :
             arr[int(Y_min):int(Y_max), int(X_min - (h-w)/2):int(X_max + (h -w)/2)] = 1.0
         return cv2.resize(arr, output_size, interpolation = cv2.INTER_NEAREST)
+
+def load_png_from_file(directory):
+    if directory[-1] != '/': directory += '/'
+
+    #open the directory
+    imgs = listdir_nohidden(directory)
+    imgs.sort()
+
+    #find matches to */XXX/YYY_contour.png or _img.png or _roi.png 
+    cont_ = [re.match(r'\./{0,1}.*/?[0-9]{3}/(?P<number>.*)_contour.png',img)  for img in imgs]
+    img_ = [re.match(r'\./{0,1}.*/?[0-9]{3}/(?P<number>.*)_img.png',img) for img in imgs]
+    roi_ = [re.match(r'\./{0,1}.*/?[0-9]{3}/(?P<number>.*)_roi.png',img) for img in imgs]
+
+    #make a dictionary for each and return it 
+    dict_cont= dict()
+    dict_img = dict()
+    dict_roi = dict()
+    for cont_match,img_match,roi_match,img in zip(cont_,img_,roi_,imgs):
+        if cont_match is not None:
+            dict_cont.setdefault(img, []).append(int(cont_match.group('number')))
+        elif img_match is not None:
+            dict_img.setdefault(img, []).append(int(img_match.group('number')))
+        elif roi_match is not None:
+            dict_roi.setdefault(img, []).append(int(roi_match.group('number')))
+        else:
+            print 'Could not find match for ', img
+    return dict_cont,dict_img,dict_roi,imgs
+
+
+
+def create_empty_dataset(image_shape=512, n_set='train', path='./Breast_MRI_cont/', roi_name = 'GTV', ret_files = False ):
+    """
+    This function extracts and returns all dicom files and contours within the given path directory.
+
+    Inputs:
+    """
+    images, images_norm, contour_mask, roi_squares= [], [], [], []
+
+
+    if path[-1] != '/': path += '/'
+
+    #loop over all the files
+    for filename in listdir_nohidden(path):
+        if filename[-1] != '/': filename += '/'
+
+        #get the contour file name
+        contour_filename = get_contour_file(filename)
+        img_voxel_full,img_norm_voxel_full, mask_voxel_full,roi_square_full = get_data(filename, contour_filename, roi_name = roi_name)
+        
+        for i,n,m,r in zip(img_voxel_full,img_norm_voxel_full, mask_voxel_full,roi_square_full):
+            if np.allclose(np.zeros(r.shape),r):
+                if (i is None) or (r is None):
+                    warnings.warn("None found!")
+                images.append(i)
+                # images_norm.append(n)
+                # contour_mask.append(m)
+                roi_squares.append(r)
+
+        print 'Loaded.'
+        sys.stdout.flush()
+    if ret_files:
+        return images, images_norm, contour_mask,roi_squares, [files for files in listdir_nohidden(path)]
+    else:
+        return images, images_norm, contour_mask,roi_squares
+
+
+# img_voxel,img_norm_voxel, mask_voxel,roi_square_

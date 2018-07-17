@@ -5,8 +5,10 @@ import numpy as np
 #import matplotlib.pyplot as plt
 
 #import pydicom as dicom
+import matplotlib 
+matplotlib.use('Agg')
 
-
+import matplotlib.pyplot as plt
 import tensorflow as tf
 import keras
 from keras import models
@@ -15,105 +17,84 @@ from keras import optimizers,regularizers
 from keras.layers import Dense, Dropout, Activation, Flatten, Reshape
 from keras.layers import Conv2D, MaxPooling2D
 from keras import backend as K
+from keras.preprocessing.image import ImageDataGenerator
+import sys
+import pickle
+
 
 #from keras_tqdm import TQDMCallback
 
 #import cv2
-
 import logging,warnings
 #import glob,os
-import data
+import data 
 
-runName = 'first'
-checkpoints_save_filepath="./checkpoints/weights.best.hdf5"
+runName = 'empty_dataset_long'
+batch_size = 16
+epochs = 220
+
+print 'runname: ',runName,' Batch size: ',batch_size, ' epochs: ' , epochs 
+
+if len(sys.argv)>1: #on home computer
+	dir_imgs = '/Users/ianbenlolo/Documents/Hospital/Breast_MRI.../'
+	checkpoints_save_filepath = '/Users/ianbenlolo/Documents/Hospital/checkpoints/'
+else:
+    checkpoints_save_filepath="./checkpoints/weights.best.hdf5"
+    path_to_contours = "/home/ianben/Breast_MRI_cont_dcm/"
+    dir_imgs = '/home/ianben/Breast_MRI_cont_png/images/'
+    dir_rois = '/home/ianben/Breast_MRI_cont_png/rois/'
 
 
 logging.basicConfig(level=logging.DEBUG)
 logging.basicConfig(filename='errors.log',level=logging.DEBUG)
 
 
-# In[86]:
-
-
-#image_path = './Breast_MRI_cont/Belec/'
-#contour_filename = 'RS.1.2.246.352.71.4.139189879485.219269.20180611142708.dcm'
-
-
-#rt_sequence = dicom.read_file(image_path+contour_filename)
-#print rt_sequence
-
-
-# In[6]:
-
-
-#dcm.get_roi_names(rt_sequence)
-#type(dcm.get_roi_names(rt_sequence))
-
-#y = rt_sequence.ROIContourSequence[1]
-#contours = [contour for contour in y.ContourSequence]
-
-
-#contour_data = dicom.read_file(image_path+contour_filename)
-
-#print dcm.get_roi_names(contour_data)
-#img_voxel, mask_voxel = get_data(image_path, contour_filename, roi_index=1)
-
-
-#image_path = './Breast_MRI_cont/Belec/'
-
-#p=dcm.slice_order(image_path)
-
-#img_voxel, mask_voxel = get_data(image_path, contour_filename, roi_index=1)
-
-
-#image_path = './Breast_MRI_cont/Belec/'
-#contour_filename = 'RS.1.2.246.352.71.4.139189879485.219269.20180611142708.dcm'
-
-#img_voxel, mask_voxel = get_data(image_path, contour_filename, roi_index=1)
-#create_dataset(image_shape=512, n_set='train', path='./Breast_MRI_cont'):
-
-
-#for img, mask in zip(img_voxel, mask_voxel):
-#    show_img_msk_fromarray(img, mask, sz=10, cmap='summer_r', alpha=0.7)
-
+print('\nConfigurating session')
 
 config = tf.ConfigProto()
 config.gpu_options.allow_growth=True
 sess = tf.Session(config=config)
 K.set_session(sess)
 
+print('Done config protocol\n')
+
+
+sys.stdout.flush()
+
+
 def create_model(activ='relu', input_shape = (512,512)):
-    """
-    Creating basic model with activation. Complex model, goal of overfitting for starters.
-    :param activ: Activation function, none if not specified
-    :param shape: shape of the model. 512x512 if not specified
-    """
-    model = models.Sequential()
+	model = models.Sequential()
+	model.add(Conv2D(filters = 8,
+		kernel_size = (12,12),
+		activation = activ,
+		strides=(1, 1),
+		padding='valid',
+		input_shape=(input_shape[0], input_shape[1],1)))
 
-    model.add(Conv2D(filters = 64,
-                     kernel_size = (12,12),
-                     activation = activ,
-                     strides=(1, 1),
-                     padding='valid',
-                     input_shape=(input_shape[0], input_shape[1],1)))
+	model.add(MaxPooling2D(pool_size=(3,3)))
 
-    model.add(MaxPooling2D(pool_size=(4,4)))
-    model.add(Conv2D(filters = 128,
-                     kernel_size = (12,12),
-                     activation = activ,
-                     strides=(1, 1),
-                     padding='valid',
-                     input_shape=(input_shape[0], input_shape[1],1)))
+	model.add(Conv2D(filters = 16,
+	kernel_size = (12,12),
+	activation = activ,
+	strides=(1, 1),
+	padding='valid',
+	input_shape=(input_shape[0], input_shape[1],1)))
 
-    model.add(MaxPooling2D(pool_size=(4,4)))
+	model.add(MaxPooling2D(pool_size=(6,6)))
+	# model.add(Conv2D(filters = 128,
+	# 	kernel_size = (12,12),
+	# 	activation = activ,
+	# 	strides=(1, 1),
+	# 	padding='valid',
+	# 	input_shape=(input_shape[0], input_shape[1],1)))
+	# model.add(MaxPooling2D(pool_size=(4,4)))
+	model.add(Flatten())
+	model.add(Dense(1024, activation='sigmoid', kernel_regularizer=regularizers.l2(0.0001)))
+	model.add(Reshape([32,32,1]))
+	return model
 
-    model.add(Flatten())
-    model.add(Dense(1024, activation='sigmoid', kernel_regularizer=regularizers.l2(0.0001)))
-    model.add(Reshape([32,32,-1]))
-    return model
 
-
-def training(m, X, Y, verbose=1, batch_size=10, epochs=20):
+def training(m, X, Y, callbacks,verbose=2, batch_size=10, epochs=20):
     """
     Training CNN
     :param m: Keras model
@@ -123,45 +104,108 @@ def training(m, X, Y, verbose=1, batch_size=10, epochs=20):
     :param verbose: Integer. 0 = silent, 1 = progress bar, 2 = one line per epoch
     :return: history, m
     """
-    history = m.fit(X, Y, batch_size=batch_size, epochs=epochs, verbose=verbose, callbacks=[TQDMCallback()])
+    history = m.fit(X, Y, batch_size=batch_size, epochs=epochs, verbose=verbose, callbacks=callbacks)
     return history
 
-print 'Extracting data...'
-img_voxels,img_norm, mask_voxels,roi_squares = data.create_dataset(path = "./Breast_MRI_cont/",roi_name = 'GTV')
 
-print '\n...done\n'
+img_voxel,_, _ ,roi_squares = data.create_empty_dataset(path = path_to_contours,roi_name = 'GTV')
+# img_voxel,_, _ ,roi_squares = data.get_data('/home/ianben/Breast_MRI_cont_dcm/032/',data.get_contour_file('/home/ianben/Breast_MRI_cont_dcm/032/'), roi_name = 'GTV')
+
+# #####
+# plt.imsave('./hello.png',img_voxel[24])
+# plt.imsave('hello1.png',roi_squares[24])
+# #####
+
+#mask_voxels_arr = np.expand_dims(np.asarray(mask_voxels), axis=3)
+
+img_voxel_arr = np.asarray(np.expand_dims(np.asarray(img_voxel), axis=3))
+roi_squares_voxels_arr = np.asarray(np.expand_dims(roi_squares,axis = 3))
+
+# #####
+# img_voxel_arr = np.tile(img_voxel_arr[24],(1000,1,1,1))
+# roi_squares_voxels_arr = np.tile(roi_squares_voxels_arr[24],(1000,1,1,1))
+# #####
+
+print ('img array shape:',img_voxel_arr.shape)
+#print ('mask array shape:',mask_voxels_arr.shape)
+print ('square mask array shape:',roi_squares_voxels_arr.shape)
+
+
+
+sys.stdout.flush()
+
+
+data_gen_args = dict(featurewise_center=False,
+				 featurewise_std_normalization=False,
+				 rotation_range=90.,
+				 #width_shift_range=0.1,
+				 #height_shift_range=0.1,
+				 zoom_range=0.2
+				 )
+
+image_datagen = ImageDataGenerator(**data_gen_args)
+roi_datagen = ImageDataGenerator(**data_gen_args)
+
+
+# image_datagen.fit(images, augment=True, seed=seed)
+# roi_datagen.fit(masks, augment=True, seed=seed)
+
+# image_generator = image_datagen.flow_from_directory(
+#                     dir_imgs, 
+#                     target_size=(512,512), 
+#                     #color_mode='grayscale',
+#                     classes=None, 
+#                     class_mode='categorical', 
+#                     batch_size=10, 
+#                     shuffle=True, 
+#                     seed=None, 
+#                     save_to_dir=None, 
+#                     save_prefix='', 
+#                     save_format='png', 
+#                     follow_links=False, 
+#                     subset=None, 
+#                     interpolation='nearest')
+
+# rois_generator = roi_datagen.flow_from_directory(
+#                     dir_rois, 
+#                     target_size=(32,32), 
+#                     #color_mode='grayscale',
+#                     classes=None, 
+#                     class_mode='categorical', 
+#                     batch_size=10, 
+#                     shuffle=True, 
+#                     seed=None, 
+#                     save_to_dir=None, 
+#                     save_prefix='', 
+#                     save_format='png', 
+#                     follow_links=False, 
+#                     subset=None, 
+#                     interpolation='nearest')
+
+
+
 #print (type(roi_squares),roi_squares.shape)
-#for img, mask,square in zip(img_voxels, mask_voxels,roi_squares):
-#    show_img_msk_fromarray(img, mask,square, sz=10, cmap='summer_r', alpha=0.7)
+# for img, mask,square in zip(img_voxels, mask_voxels,roi_squares):
+#    data.show_img_msk_fromarray(img, mask,square, sz=10, cmap='summer_r', alpha=0.7,save_path = '/Users/ianbenlolo/Documents/Hospital/images/')
+
+
 
 print 'Creating model'
-
 m = create_model()
-gpu_model = keras.utils.multi_gpu_model(m,gpus = 2)
 
-gpu_model.compile(loss='mean_squared_error',
-          optimizer='adam',
-          metrics=['accuracy'])
 
-#print('Size for each layer :\nLayer, Input Size, Output Size')
-#for p in m.layers:
-#    print(p.name.title(), p.input_shape, p.output_shape)
+# if len(sys.argv)>1:
+#     m.compile(loss='mean_squared_error',optimizer='adam',metrics=['accuracy'])
+
+
+print('Size for each layer :\nLayer, Input Size, Output Size')
+for p in m.layers:
+   print(p.name.title(), p.input_shape, p.output_shape)
+
 print 'Model summary:'
 m.summary()
 
-
-img_norm_arr = np.expand_dims(np.asarray(img_norm), axis=0)
-mask_voxels_arr = np.expand_dims(np.asarray(mask_voxels), axis=0)
-roi_squares_voxels_arr = np.expand_dims(roi_squares,axis = 0)
-
-
-img_norm_arr = np.moveaxis(img_norm_arr,0,-1)
-mask_voxels_arr = np.moveaxis(mask_voxels_arr,0,-1)
-roi_squares_voxels_arr = np.moveaxis(roi_squares_voxels_arr,0,-1)
-
-print ('img array shape:',img_norm_arr.shape)
-print ('mask array shape:',mask_voxels_arr.shape)
-print ('square mask array shape:',roi_squares_voxels_arr.shape)
+sys.stdout.flush()
 
 
 #save checkpoints
@@ -172,8 +216,38 @@ callbacks_list = [checkpoint]
 #model.load_weights("weights.best.hdf5")
 
 print('__FITTING__')
-hist = gpu_model.fit(img_norm_arr, roi_squares_voxels_arr, batch_size=10, epochs=40, verbose=2,callbacks=callbacks_list) #callbacks=[TQDMCallback()]
+sys.stdout.flush()
 
-#with open('/home/ianben/trainHistoryDict', 'wb') as file_pi:
-#        pickle.dump(hist.history, file_pi)
+if len(sys.argv)==1:
+    gpu_model = keras.utils.multi_gpu_model(m,gpus = 2)
+
+    gpu_model.compile(loss='mean_squared_error',optimizer='SGD',metrics=['accuracy'])
+
+    history = training(gpu_model,img_voxel_arr,roi_squares_voxels_arr,callbacks = callbacks_list, batch_size=batch_size, epochs= epochs)
+
+    # history = gpu_model.fit_generator(
+    #     zip(image_generator, rois_generator),
+    #     steps_per_epoch=20,
+    #     epochs=200)
+
+    # with open('/home/ianben/models/'+runName+'_hist', 'wb') as file_pi:
+    #     pickle.dump(history.history, file_pi)
+
+elif len(sys.argv)>1:
+    m.compile(loss='mean_squared_error',optimizer='adam',metrics=['accuracy'])
+    # history = m.fit_generator(
+    #     zip(image_generator, rois_generator),
+    #     steps_per_epoch=20,
+    #     epochs=200)
+    
+    history = training(m, img_voxel_arr,roi_squares_voxels_arr,callbacks = callbacks_list, batch_size=batch_size, epochs= epochs)
+
+    with open('~/Users/ianbenlolo/Documents/models/'+runname+'_hist', 'wb') as file_pi:
+	   pickle.dump(history.history, file_pi)
+
+#callbacks=[TQDMCallback()]
+
 m.save('/home/ianben/models/'+runName+'.h5')
+
+print 'Done.'
+
